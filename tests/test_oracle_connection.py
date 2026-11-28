@@ -3,6 +3,45 @@ import os
 import oracledb
 from dotenv import load_dotenv
 
+
+def validar_cliente(cliente, cpfs_processados):
+    erros = []
+
+    if not cliente["nome"].strip():
+        erros.append("Nome obrigatorio")
+
+    if not cliente["email"].strip():
+        erros.append("Email obrigatorio")
+
+    cpf = cliente["cpf"]
+
+    if len(cpf) != 11 or not cpf.isdigit():
+        erros.append("CPF invalido")
+
+    if cpf in cpfs_processados:
+        erros.append("CPF duplicado no lote")
+
+    return erros
+
+
+def cliente_existe(cursor, cpf):
+    cursor.execute(
+        "SELECT 1 FROM CLIENTES WHERE CPF = :cpf",
+        {"cpf": cpf}
+    )
+    return cursor.fetchone() is not None
+
+
+def inserir_cliente(cursor, cliente):
+    cursor.execute(
+        """
+        INSERT INTO CLIENTES (NOME, EMAIL, CPF)
+        VALUES (:nome, :email, :cpf)
+        """,
+        cliente,
+    )
+
+
 load_dotenv()
 
 connection = oracledb.connect(
@@ -11,90 +50,68 @@ connection = oracledb.connect(
     dsn=os.getenv("DB_TNS_NAME"),
     config_dir=os.getenv("DB_WALLET_DIR"),
     wallet_location=os.getenv("DB_WALLET_DIR"),
-    wallet_password=os.getenv("DB_WALLET_PASSWORD")
+    wallet_password=os.getenv("DB_WALLET_PASSWORD"),
 )
 
-print("Conexão com Oracle realizada com sucesso!")
-
-def validar_cliente(cliente, cpfs_existentes):
-    erros = []
-
-    if not cliente["nome"]:
-        erros.append("Nome obrigatório")
-
-    if not cliente["email"]:
-        erros.append("E-mail obrigatório")
-
-    cpf = cliente["cpf"]
-
-    if not cpf or len(cpf) != 11 or not cpf.isdigit():
-        erros.append("CPF inválido")
-
-    elif cpf in cpfs_existentes:
-        erros.append("CPF duplicado no banco")
-
-    return erros
-
-clientes_teste = [
-    {
-        "nome": "Carlos Lima",
-        "email": "carlos@email.com",
-        "cpf": "45678901234"
-    },
-    {
-        "nome": "Ana Souza",
-        "email": "",
-        "cpf": "56789012345"
-    },
-    {
-        "nome": "Pedro Alves",
-        "email": "pedro@email.com",
-        "cpf": "45678901234"
-    }
-]
-
-cpfs_existentes = {"45678901234"}
-
-for cliente in clientes_teste:
-    erros = validar_cliente(cliente, cpfs_existentes)
-
-    if erros:
-        print(cliente["nome"], "REPROVADO:", erros)
-    else:
-        print(cliente["nome"], "APROVADO")
+print("Conexao com Oracle realizada com sucesso!")
 
 try:
     with connection.cursor() as cursor:
 
         cursor.execute("SELECT USER FROM DUAL")
-        print("Usuário conectado:", cursor.fetchone()[0])
+        print("Usuario conectado:", cursor.fetchone()[0])
 
         clientes = [
-            ("Maria Silva", "maria@email.com", "12345678901"),
-            ("João Santos", "joao@email.com", "23456789012"),
-            ("Ana Costa", "ana@email.com", "34567890123")
+            {"nome": "Carlos Lima", "email": "carlos@email.com", "cpf": "45663301234"},
+            {"nome": "Ana Souza", "email": "", "cpf": "56789012345"},
+            {"nome": "Pedro Alves", "email": "pedro@email.com", "cpf": "45678901234"},
         ]
 
-        cursor.executemany("""
-            INSERT INTO CLIENTES (NOME, EMAIL, CPF)
-            VALUES (:1, :2, :3)
-        """, clientes)
+        cpfs_processados = set()
+
+        recebidos = len(clientes)
+        inseridos = 0
+        rejeitados = 0
+
+        for cliente in clientes:
+            try:
+                erros = validar_cliente(cliente, cpfs_processados)
+
+                if erros:
+                    rejeitados += 1
+                    print(f"{cliente['nome']}: REPROVADO - {erros}")
+                    continue
+
+
+                if cliente_existe(cursor, cliente["cpf"]):
+                    rejeitados += 1
+                    print(
+                        f"{cliente['nome']}: REPROVADO - "
+                        "CPF ja cadastrado no banco"
+                    )
+                    continue
+
+                cursor.execute("SAVEPOINT antes_do_insert")
+                
+                inserir_cliente(cursor, cliente)
+
+                cpfs_processados.add(cliente["cpf"])
+                inseridos += 1
+
+                print(f"{cliente['nome']}: APROVADO")
+
+            except oracledb.DatabaseError as erro:
+                cursor.execute("ROLLBACK TO antes_do_insert")
+                rejeitados += 1
+                print(f"{cliente['nome']}: ERRO NO BANCO - {erro}")
 
         connection.commit()
 
-        print(f"{cursor.rowcount} clientes inseridos!")
-
-        cursor.execute("""
-            SELECT ID_CLIENTE, NOME, EMAIL, CPF, DATA_CADASTRO
-            FROM CLIENTES
-            ORDER BY ID_CLIENTE
-        """)
-
-        resultados = cursor.fetchall()
-
-        for cliente in resultados:
-            print(cliente)
+        print("\n===== RELATORIO DA CARGA =====")
+        print(f"Registros recebidos: {recebidos}")
+        print(f"Registros inseridos: {inseridos}")
+        print(f"Registros rejeitados: {rejeitados}")
 
 finally:
     connection.close()
-    print("Conexão encerrada.")
+    print("Conexao encerrada.")
